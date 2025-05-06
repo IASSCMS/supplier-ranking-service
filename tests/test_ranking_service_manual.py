@@ -3,12 +3,13 @@ import sys
 import django
 import random
 from datetime import datetime, timedelta, date
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
 # Set up Django environment
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'suplier_ranking_service.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'supplier_ranking_service.settings')
 django.setup()
 
 # Import your local models
@@ -51,13 +52,12 @@ def setup_test_data():
     
     # For testing purposes, we'll log some information about external suppliers
     suppliers = []
-    supplier_ids = [1, 2, 3, 4, 5]  # Assuming these IDs exist in User Service
+    supplier_ids = [3]  # Assuming these IDs exist in User Service
     
-    for supplier_id in supplier_ids:
-        supplier_info = user_service.get_supplier_info(supplier_id)
-        if supplier_info:
-            print(f"Found supplier: {supplier_info['name']} (ID: {supplier_info['id']})")
-            suppliers.append(supplier_info)
+    active_suppliers = user_service.get_active_suppliers()
+    for supplier in active_suppliers:
+        print("Supplier ID:", supplier["user"]["id"])
+        print("Company Name:", supplier["company_name"])
     
     # Get some product information for testing
     product_ids = [101, 102, 103]  # Assuming these IDs exist in Warehouse Service
@@ -262,7 +262,6 @@ def visualize_results(rankings):
         return
     
     try:
-        import matplotlib
         matplotlib.use('Agg')  # Use non-interactive backend if running headless
     except:
         pass

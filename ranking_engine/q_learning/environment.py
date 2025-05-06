@@ -208,7 +208,7 @@ class SupplierEnvironment:
                 supplier_id=supplier_id,
                 date=today,
                 defaults={
-                    'supplier_name': supplier_info.get('name', f"Supplier {supplier_id}"),
+                    'supplier_name': supplier_info.get('company_name', f"Supplier {supplier_id}"),
                     'quality_score': performance['quality_score'],
                     'defect_rate': performance['defect_rate'],
                     'return_rate': performance['return_rate'],
@@ -473,7 +473,7 @@ class SupplierEnvironment:
                 )
                 return None
                 
-            supplier_name = supplier_info.get('name', f"Supplier {supplier_id}")
+            supplier_name = supplier_info.get('company_name', f"Supplier {supplier_id}")
             current_state = self.get_state(supplier_id)
             today = datetime.now().date()
             

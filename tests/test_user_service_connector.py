@@ -15,10 +15,10 @@ class TestUserServiceConnector(TestCase):
     def setUp(self):
         """Set up test environment before each test"""
         # Configure test settings
-        self.test_url = "http://test-user-service.example.com"
+        self.test_url = "http://localhost:8000"
         
         # Override Django settings for testing
-        settings.USER_SERVICE_URL = self.test_url
+        settings.AUTH_SERVICE_URL = self.test_url
         
         # Create an instance of the connector
         self.connector = UserServiceConnector()

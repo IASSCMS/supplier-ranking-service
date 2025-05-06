@@ -1,6 +1,5 @@
 import unittest
 from unittest.mock import patch, MagicMock, Mock
-import numpy as np
 from datetime import datetime, timedelta
 
 from api.models import (

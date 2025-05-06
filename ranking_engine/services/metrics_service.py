@@ -399,8 +399,8 @@ class MetricsService:
         all_metrics = []
         
         for supplier in suppliers:
-            metrics = self.calculate_combined_metrics(supplier['id'], days)
-            metrics['supplier_name'] = supplier['name']
+            metrics = self.calculate_combined_metrics(supplier['user']['id'], days)
+            metrics['supplier_name'] = supplier['company_name']
             metrics['supplier_code'] = supplier['code']
             all_metrics.append(metrics)
         

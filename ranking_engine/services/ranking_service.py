@@ -201,7 +201,7 @@ class RankingService:
             # Get supplier name from user service
             user_service = UserServiceConnector()
             supplier_data = user_service.get_supplier_by_id(supplier_id)
-            supplier_name = supplier_data.get('name', f"Supplier {supplier_id}")
+            supplier_name = supplier_data.get('company_name', f"Supplier {supplier_id}")
             
             # Check if a ranking already exists for today
             today = date.today()
@@ -459,7 +459,7 @@ class RankingService:
                 # Get supplier name from user service
                 user_service = UserServiceConnector()
                 supplier_data = user_service.get_supplier_by_id(supplier_id)
-                supplier_name = supplier_data.get('name', f"Supplier {supplier_id}")
+                supplier_name = supplier_data.get('company_name', f"Supplier {supplier_id}")
                 
                 # Update or create performance cache
                 SupplierPerformanceCache.objects.update_or_create(

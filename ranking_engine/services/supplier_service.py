@@ -40,7 +40,7 @@ class SupplierService:
         """
         try:
             suppliers = self.user_service.get_active_suppliers()
-            return [supplier.get('id') for supplier in suppliers]
+            return [supplier['user'].get('id') for supplier in suppliers]
         except Exception as e:
             logger.error(f"Error retrieving active supplier IDs: {str(e)}")
             return []
