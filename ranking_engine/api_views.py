@@ -134,106 +134,87 @@ class SupplierRankingView(APIView):
     Get ranked suppliers for a product in a city
     """
     permission_classes = [AllowAny]
-    
+
     def get(self, request):
         product_id = request.query_params.get('product_id')
-        city = request.query_params.get('city')  # Using city instead of region
-        
+        city = request.query_params.get('city')
+
         if not product_id:
             return Response(
                 {"error": "product_id is required"},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         try:
-            # Get suppliers that offer this product
             warehouse_service = WarehouseServiceConnector()
             suppliers = warehouse_service.get_suppliers_by_product(product_id)
-            
+
             if not suppliers:
                 return Response(
                     {"message": f"No suppliers found for product {product_id}"},
                     status=status.HTTP_200_OK
                 )
-            
-            # Get metrics for each supplier
-            metrics_service = MetricsService()
+
             supplier_service = SupplierService()
+            agent = SupplierRankingAgent()
             ranked_suppliers = []
-            
-            logger.info(f"Getting rankings for suppliers offering product {product_id} in city {city}")
-            
+
             for supplier_id in suppliers:
-                # Get supplier details to check city
                 supplier = supplier_service.get_supplier(supplier_id)
-                
-                # Skip if supplier is not in the requested city
-                supplier_city = None
-                if supplier:
-                    if 'city' in supplier:
-                        supplier_city = supplier['city']
-                    elif 'user' in supplier and 'city' in supplier['user']:
-                        supplier_city = supplier['user']['city']
-                
+                if not supplier:
+                    continue
+
                 # Filter by city if provided
+                supplier_city = (
+                    supplier.get("city")
+                    or supplier.get("user", {}).get("city")
+                )
                 if city and supplier_city and supplier_city.lower() != city.lower():
                     continue
-                
-                # Calculate metrics for this supplier
-                metrics = metrics_service.calculate_combined_metrics(supplier_id)
-                
-                # Get state for these metrics
-                state_mapper = StateMapper()
-                state = state_mapper.get_state_from_metrics(metrics)
-                
-                # Get Q-values for this state and supplier
-                q_entries = QTableEntry.objects.filter(state=state).order_by('-q_value')
-                
-                # Get best action and its Q-value
-                best_q_value = 0.0
-                best_action = None
-                
-                if q_entries:
-                    best_entry = q_entries.first()
-                    best_q_value = best_entry.q_value
-                    best_action = best_entry.action.name
-                
-                # Calculate overall score
-                score = metrics['overall_score']
-                
-                # Get company name with fallback
-                company_name = None
-                if supplier:
-                    company_name = supplier.get('company_name', 
-                                  supplier.get('name',
-                                  supplier.get('user', {}).get('name', f"Unknown Supplier {supplier_id}")))
-                
+
+                # Perform Q-learning based ranking
+                action, reward, ranking = agent.rank_supplier(
+                    supplier_id,
+                    update_ranking=True,
+                    exploration=False
+                )
+
+                if not ranking:
+                    continue
+
+                # Fetch Q-value for the chosen state-action pair
+                try:
+                    q_entry = QTableEntry.objects.get(state=ranking.state, action=action)
+                    q_value = q_entry.q_value
+                except QTableEntry.DoesNotExist:
+                    q_value = 0.0
+
                 ranked_suppliers.append({
-                    "supplier_id": supplier_id,
-                    "company_name": company_name,
-                    "score": score,
-                    "state": state.name,
-                    "best_action": best_action,
-                    "q_value": best_q_value,
+                    "supplier_id": ranking.supplier_id,
+                    "company_name": ranking.supplier_name,
+                    "score": ranking.overall_score,
+                    "state": ranking.state.name,
+                    "best_action": action.name,
+                    "q_value": q_value,
                     "city": supplier_city
                 })
-            
-            # Sort by score descending
+
             ranked_suppliers.sort(key=lambda x: x["score"], reverse=True)
-            
+
             return Response({
                 "product_id": product_id,
                 "city": city,
                 "suppliers": ranked_suppliers,
                 "count": len(ranked_suppliers)
             })
-            
+
         except Exception as e:
             logger.error(f"Error getting supplier rankings: {str(e)}")
             return Response(
                 {"error": f"Failed to get supplier rankings: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
 
 
 class ManualTrainingView(APIView):
