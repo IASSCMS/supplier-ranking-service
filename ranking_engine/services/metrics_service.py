@@ -122,31 +122,40 @@ class MetricsService:
         Returns:
             dict: Dictionary containing delivery metrics
         """
-        start_date = timezone.now() - timedelta(days=days)
+        from datetime import datetime
         
-        # Get completed transactions from Order Service
-        completed_transactions = self.order_service.get_supplier_transactions(
+        start_date = date.today() - timedelta(days=days)
+        
+        # Get transactions from Order Service
+        transactions = self.order_service.get_supplier_transactions(
             supplier_id=supplier_id,
-            start_date=start_date,
-            status=['DELIVERED', 'COMPLETED'],  # Only delivered orders
-            has_delivery_date=True  # Only orders with delivery dates
+            start_date=start_date
         )
         
-        # Get performance records from Order Service
+        # Get performance records
         performance_records = self.order_service.get_supplier_performance_records(
             supplier_id=supplier_id,
             start_date=start_date
         )
         
-        # Calculate on-time delivery rate from transactions
+        # Focus on completed transactions
+        completed_transactions = [
+            t for t in transactions 
+            if t.get('status') == 'completed' and t.get('actual_delivery_date')
+        ]
+        
+        # Calculate on-time delivery rate
         total_delivered = len(completed_transactions)
         
-        on_time_delivered = sum(
-            1 for t in completed_transactions
-            if t.get('actual_delivery_date') and t.get('expected_delivery_date') and
-            t.get('actual_delivery_date') <= t.get('expected_delivery_date')
-        )
-        
+        if total_delivered > 0:
+            on_time_delivered = len([
+                t for t in completed_transactions
+                if (t.get('actual_delivery_date') and t.get('expected_delivery_date') and
+                    t.get('actual_delivery_date') <= t.get('expected_delivery_date'))
+            ])
+        else:
+            on_time_delivered = 0
+            
         on_time_rate = (on_time_delivered / total_delivered * 100) if total_delivered > 0 else 0
         
         # Calculate average delay in days for delayed transactions
@@ -157,8 +166,10 @@ class MetricsService:
         ]
         
         if delayed_transactions:
+            # Parse date strings to datetime objects before subtraction
             total_delay_days = sum(
-                (t.get('actual_delivery_date') - t.get('expected_delivery_date')).days
+                (datetime.strptime(t.get('actual_delivery_date'), '%Y-%m-%d') - 
+                 datetime.strptime(t.get('expected_delivery_date'), '%Y-%m-%d')).days
                 for t in delayed_transactions
             )
             avg_delay = total_delay_days / len(delayed_transactions)
@@ -180,13 +191,6 @@ class MetricsService:
         on_time_score = combined_on_time_rate / 10
         delay_score = max(0, 10 - min(10, combined_avg_delay * 2))
         
-        # Get supplier products from Warehouse Service
-        supplier_products = self.warehouse_service.get_supplier_products(supplier_id)
-        
-        # Average lead time across products
-        lead_times = [product.get('lead_time_days', 0) for product in supplier_products]
-        avg_lead_time = sum(lead_times) / len(lead_times) if lead_times else 0
-        
         # Get fill rate and order accuracy from performance records
         fill_rates = [record.get('fill_rate', 90.0) for record in performance_records]
         order_accuracies = [record.get('order_accuracy', 95.0) for record in performance_records]
@@ -204,7 +208,6 @@ class MetricsService:
             'delivery_score': delivery_score,
             'on_time_delivery_rate': combined_on_time_rate,
             'average_delay_days': combined_avg_delay,
-            'average_lead_time': avg_lead_time,
             'fill_rate': avg_fill_rate,
             'order_accuracy': avg_order_accuracy,
             'transactions_analyzed': total_delivered
@@ -362,13 +365,21 @@ class MetricsService:
         price_metrics = self.calculate_price_metrics(supplier_id, days)
         service_metrics = self.calculate_service_metrics(supplier_id, days)
         
+        # Get supplier info to access compliance score
+        supplier_info = self.get_supplier_info(supplier_id)
+        compliance_score = supplier_info.get('compliance_score', 5.0) if supplier_info else 5.0
+        
         # Calculate overall score based on configuration weights
+        # Include compliance score as part of the overall evaluation
         overall_score = (
             quality_metrics['quality_score'] * config.quality_weight +
             delivery_metrics['delivery_score'] * config.delivery_weight +
             price_metrics['price_score'] * config.price_weight +
             service_metrics['service_score'] * config.service_weight
         )
+        
+        # Adjust overall score with compliance score (giving it 20% weight)
+        overall_score = overall_score * 0.8 + compliance_score * 0.2
         
         # Build combined metrics dictionary
         combined_metrics = {
@@ -378,6 +389,7 @@ class MetricsService:
             'delivery_score': delivery_metrics['delivery_score'],
             'price_score': price_metrics['price_score'],
             'service_score': service_metrics['service_score'],
+            'compliance_score': compliance_score,
             'quality_metrics': quality_metrics,
             'delivery_metrics': delivery_metrics,
             'price_metrics': price_metrics,
@@ -399,8 +411,8 @@ class MetricsService:
         all_metrics = []
         
         for supplier in suppliers:
-            metrics = self.calculate_combined_metrics(supplier['id'], days)
-            metrics['supplier_name'] = supplier['name']
+            metrics = self.calculate_combined_metrics(supplier['user']['id'], days)
+            metrics['supplier_name'] = supplier['company_name']
             metrics['supplier_code'] = supplier['code']
             all_metrics.append(metrics)
         
@@ -412,3 +424,139 @@ class MetricsService:
             metrics['rank'] = i + 1
         
         return all_metrics
+        
+    # New functions to satisfy the requirements of the environment.py file
+    
+    def get_quality_metrics(self, supplier_id, days=90):
+        """
+        Retrieves quality metrics for a supplier.
+        This function is a wrapper around calculate_quality_metrics for use by the environment.
+        
+        Args:
+            supplier_id (int): ID of the supplier
+            days (int, optional): Number of days to look back. Defaults to 90.
+            
+        Returns:
+            dict: Dictionary containing quality metrics
+        """
+        return self.calculate_quality_metrics(supplier_id, days)
+
+    def get_delivery_metrics(self, supplier_id, days=90):
+        """
+        Retrieves delivery metrics for a supplier.
+        This function is a wrapper around calculate_delivery_metrics for use by the environment.
+        
+        Args:
+            supplier_id (int): ID of the supplier
+            days (int, optional): Number of days to look back. Defaults to 90.
+            
+        Returns:
+            dict: Dictionary containing delivery metrics
+        """
+        return self.calculate_delivery_metrics(supplier_id, days)
+
+    def get_price_metrics(self, supplier_id, days=90):
+        """
+        Retrieves price metrics for a supplier.
+        This function is a wrapper around calculate_price_metrics for use by the environment.
+        
+        Args:
+            supplier_id (int): ID of the supplier
+            days (int, optional): Number of days to look back. Defaults to 90.
+            
+        Returns:
+            dict: Dictionary containing price metrics
+        """
+        return self.calculate_price_metrics(supplier_id, days)
+
+    def get_service_metrics(self, supplier_id, days=90):
+        """
+        Retrieves service metrics for a supplier.
+        This function is a wrapper around calculate_service_metrics for use by the environment.
+        
+        Args:
+            supplier_id (int): ID of the supplier
+            days (int, optional): Number of days to look back. Defaults to 90.
+            
+        Returns:
+            dict: Dictionary containing service metrics
+        """
+        return self.calculate_service_metrics(supplier_id, days)
+        
+    def get_supplier_info(self, supplier_id):
+        """
+        Retrieves supplier information from the user service
+        
+        Args:
+            supplier_id (int): ID of the supplier
+            
+        Returns:
+            dict: Dictionary containing supplier information
+        """
+        try:
+            # Get supplier information from the user service
+            # Use get_supplier_by_id to match the function in UserServiceConnector
+            supplier = self.user_service.get_supplier_by_id(supplier_id)
+            
+            if not supplier:
+                return None
+                
+            # Extract relevant information
+            supplier_info = {
+                'id': supplier.get('user', {}).get('id'),
+                'company_name': supplier.get('company_name', f"Supplier {supplier_id}"),
+                'code': supplier.get('code', ''),
+                'status': supplier.get('active', True),
+                'compliance_score': supplier.get('compliance_score', 5.0),
+                'registration_date': supplier.get('created_at')
+            }
+            
+            return supplier_info
+            
+        except Exception as e:
+            print(f"Error getting supplier info: {str(e)}")
+            return None
+
+    def get_supplier_metrics(self, supplier_id, days=90):
+        """
+        Gets all metrics for a supplier in a single call
+        
+        Args:
+            supplier_id (int): The ID of the supplier
+            days (int): Number of days to look back for metrics
+            
+        Returns:
+            dict: Dictionary containing all supplier metrics
+        """
+        quality_metrics = self.get_quality_metrics(supplier_id, days)
+        delivery_metrics = self.get_delivery_metrics(supplier_id, days)
+        price_metrics = self.get_price_metrics(supplier_id, days)
+        service_metrics = self.get_service_metrics(supplier_id, days)
+        
+        # Combine all metrics
+        metrics = {
+            'quality_score': quality_metrics.get('quality_score', 0),
+            'delivery_score': delivery_metrics.get('delivery_score', 0),
+            'price_score': price_metrics.get('price_score', 0),
+            'service_score': service_metrics.get('service_score', 0),
+            'overall_score': 0  # Will be calculated below
+        }
+        
+        # Get weights from configuration
+        config = self.get_active_configuration()
+        weights = {
+            'quality': config.quality_weight,
+            'delivery': config.delivery_weight,
+            'price': config.price_weight,
+            'service': config.service_weight
+        }
+        
+        # Calculate overall score using weighted average
+        metrics['overall_score'] = (
+            metrics['quality_score'] * weights['quality'] +
+            metrics['delivery_score'] * weights['delivery'] +
+            metrics['price_score'] * weights['price'] +
+            metrics['service_score'] * weights['service']
+        )
+        
+        return metrics

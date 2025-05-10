@@ -1,374 +1,413 @@
 """
 Kafka utilities for the Supplier Ranking Service
 
-This module provides wrapper classes for Kafka producers and consumers
-to facilitate message-based integration with other services in the
-Intelligent and Smart Supply Chain Management System.
+This module provides Kafka client functionality for producing and consuming
+messages related to supplier events and ranking updates.
 """
 
 import json
 import logging
-from typing import Dict, List, Any, Optional, Union, Callable
-from datetime import datetime, timedelta
-from confluent_kafka import Producer as ConfluentProducer
-from confluent_kafka import Consumer as ConfluentConsumer
-from confluent_kafka import KafkaException, KafkaError
+import threading
+import time
+from typing import Dict, List, Any, Callable, Optional
+
+from kafka import KafkaConsumer, KafkaProducer
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 
-class KafkaProducer:
+class KafkaClient:
     """
-    Wrapper class for Kafka producer to publish messages to topics
+    Client for interacting with Kafka for the Supplier Ranking Service.
+    Handles producing events to Kafka topics and consuming events from Kafka topics.
     """
-    
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the Kafka producer with configuration
 
-        Args:
-            config: Optional configuration dictionary for Kafka producer
-        """
-        default_config = {
-            'bootstrap.servers': getattr(settings, 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092'),
-            'client.id': getattr(settings, 'KAFKA_CLIENT_ID', 'supplier-ranking-service'),
-            'acks': 'all',  # Wait for all replicas to acknowledge
-            'retries': 3,
-            'retry.backoff.ms': 500
-        }
-        
-        # Merge provided config with defaults
-        if config:
-            default_config.update(config)
-            
-        try:
-            self.producer = ConfluentProducer(default_config)
-            logger.info("Kafka producer initialized")
-        except KafkaException as e:
-            logger.error(f"Failed to initialize Kafka producer: {str(e)}")
-            self.producer = None
-            
-    def produce(self, topic: str, value: Union[str, Dict], key: Optional[str] = None, 
-                headers: Optional[Dict[str, str]] = None, callback: Optional[Callable] = None):
-        """
-        Publish a message to a Kafka topic
+    def __init__(self):
+        """Initialize Kafka producer and consumer"""
+        self.bootstrap_servers = settings.KAFKA_BOOTSTRAP_SERVERS
+        self._producer = None
+        self._consumers = {}
+        self._running = False
+        self._consumer_threads = {}
 
-        Args:
-            topic: The Kafka topic to publish to
-            value: The message value (string or dict to be JSON serialized)
-            key: Optional message key
-            headers: Optional message headers
-            callback: Optional delivery callback function
-
+    @property
+    def producer(self) -> Optional[KafkaProducer]:
+        """
+        Lazy initialization of Kafka producer.
         Returns:
-            bool: True if message was sent to Kafka broker, False otherwise
+            KafkaProducer: Configured Kafka producer instance or None if initialization fails
         """
-        if not self.producer:
-            logger.error("Kafka producer not initialized")
-            return False
-            
-        try:
-            # Convert dict to JSON string if necessary
-            if isinstance(value, dict):
-                value = json.dumps(value)
-                
-            # Default callback function for delivery reports
-            def delivery_report(err, msg):
-                if err is not None:
-                    logger.error(f"Message delivery failed: {err}")
-                    if callback:
-                        callback(False, err)
-                else:
-                    logger.debug(f"Message delivered to {msg.topic()} [{msg.partition()}]")
-                    if callback:
-                        callback(True, None)
-            
-            # Prepare headers in the format expected by confluent-kafka
-            kafka_headers = None
-            if headers:
-                kafka_headers = [(k, v.encode('utf-8') if isinstance(v, str) else v) 
-                                for k, v in headers.items()]
-            
-            # Produce message to topic
-            self.producer.produce(
-                topic=topic,
-                key=key.encode('utf-8') if key else None,
-                value=value.encode('utf-8'),
-                headers=kafka_headers,
-                callback=delivery_report
-            )
-            
-            # Poll producer queue to trigger callbacks
-            self.producer.poll(0)
-            return True
-            
-        except KafkaException as e:
-            logger.error(f"Error producing message to Kafka: {str(e)}")
-            if callback:
-                callback(False, str(e))
-            return False
-            
-    def flush(self, timeout: float = 10.0):
-        """
-        Wait for all messages to be delivered
-
-        Args:
-            timeout: Maximum time to block in seconds
-            
-        Returns:
-            Number of messages still in queue
-        """
-        if self.producer:
-            return self.producer.flush(timeout)
-        return 0
-
-
-class KafkaMessage:
-    """
-    Class representing a message received from Kafka
-    """
-    
-    def __init__(self, kafka_msg):
-        """
-        Initialize with a Kafka message
-        
-        Args:
-            kafka_msg: Original Kafka message object
-        """
-        self._kafka_msg = kafka_msg
-        self._value = None
-        self._parsed_value = None
-        
-    def topic(self) -> str:
-        """Get the topic name"""
-        return self._kafka_msg.topic()
-        
-    def partition(self) -> int:
-        """Get the partition number"""
-        return self._kafka_msg.partition()
-        
-    def offset(self) -> int:
-        """Get the offset"""
-        return self._kafka_msg.offset()
-        
-    def key(self) -> Optional[str]:
-        """Get the message key as string if present"""
-        if self._kafka_msg.key() is not None:
-            return self._kafka_msg.key().decode('utf-8')
-        return None
-        
-    def value(self) -> str:
-        """Get the message value as string"""
-        if self._value is None:
-            self._value = self._kafka_msg.value().decode('utf-8')
-        return self._value
-        
-    def json(self) -> Optional[Dict]:
-        """Get the message value as parsed JSON"""
-        if self._parsed_value is None:
+        if self._producer is None:
             try:
-                self._parsed_value = json.loads(self.value())
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse message value as JSON: {self.value()[:100]}...")
-                return None
-        return self._parsed_value
-        
-    def headers(self) -> Dict[str, str]:
-        """Get the message headers as a dictionary"""
-        if self._kafka_msg.headers() is None:
-            return {}
-            
-        return {
-            key: value.decode('utf-8') if isinstance(value, bytes) else value
-            for key, value in self._kafka_msg.headers()
-        }
-        
-    def timestamp(self) -> tuple:
-        """Get the message timestamp information"""
-        return self._kafka_msg.timestamp()
-
-
-class KafkaConsumer:
-    """
-    Wrapper class for Kafka consumer to subscribe to topics
-    """
-    
-    def __init__(self, topics: Union[str, List[str]], config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the Kafka consumer with topics and configuration
-
-        Args:
-            topics: Topic or list of topics to subscribe to
-            config: Optional configuration dictionary for Kafka consumer
-        """
-        # Convert single topic to list
-        if isinstance(topics, str):
-            topics = [topics]
-            
-        default_config = {
-            'bootstrap.servers': getattr(settings, 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092'),
-            'group.id': getattr(settings, 'KAFKA_CONSUMER_GROUP', 'supplier-ranking-group'),
-            'auto.offset.reset': 'earliest',
-            'enable.auto.commit': True,
-            'auto.commit.interval.ms': 5000
-        }
-        
-        # Merge provided config with defaults
-        if config:
-            default_config.update(config)
-            
-        try:
-            self.consumer = ConfluentConsumer(default_config)
-            self.consumer.subscribe(topics)
-            logger.info(f"Kafka consumer subscribed to topics: {', '.join(topics)}")
-        except KafkaException as e:
-            logger.error(f"Failed to initialize Kafka consumer: {str(e)}")
-            self.consumer = None
-            
-    def poll(self, timeout: float = 1.0) -> Optional[KafkaMessage]:
-        """
-        Poll for new messages
-        
-        Args:
-            timeout: Maximum time to block waiting for a message
-            
-        Returns:
-            KafkaMessage if a message was received, None otherwise
-        """
-        if not self.consumer:
-            logger.error("Kafka consumer not initialized")
-            return None
-            
-        try:
-            msg = self.consumer.poll(timeout)
-            
-            if msg is None:
-                return None
-                
-            if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
-                    # End of partition, not an error
-                    logger.debug(f"Reached end of partition: {msg.topic()} [{msg.partition()}]")
-                else:
-                    logger.error(f"Error polling Kafka: {msg.error()}")
-                return None
-                
-            return KafkaMessage(msg)
-            
-        except KafkaException as e:
-            logger.error(f"Exception polling Kafka: {str(e)}")
-            return None
-            
-    def consume(self, num_messages: int = 100, timeout: float = 1.0) -> List[KafkaMessage]:
-        """
-        Consume multiple messages at once
-        
-        Args:
-            num_messages: Maximum number of messages to consume
-            timeout: Maximum time to block waiting for messages
-            
-        Returns:
-            List of KafkaMessage objects
-        """
-        if not self.consumer:
-            logger.error("Kafka consumer not initialized")
-            return []
-            
-        try:
-            messages = self.consumer.consume(num_messages, timeout)
-            result = []
-            
-            for msg in messages:
-                if msg.error():
-                    if msg.error().code() != KafkaError._PARTITION_EOF:
-                        logger.error(f"Error consuming from Kafka: {msg.error()}")
-                else:
-                    result.append(KafkaMessage(msg))
-                    
-            return result
-            
-        except KafkaException as e:
-            logger.error(f"Exception consuming from Kafka: {str(e)}")
-            return []
-            
-    def commit(self, message: Optional[KafkaMessage] = None, asynchronous: bool = False):
-        """
-        Commit offsets to Kafka
-        
-        Args:
-            message: Specific message to commit, or None to commit current offsets
-            asynchronous: Whether to commit asynchronously
-            
-        Returns:
-            None
-        """
-        if not self.consumer:
-            logger.error("Kafka consumer not initialized")
-            return
-            
-        try:
-            if message:
-                self.consumer.commit(message._kafka_msg, asynchronous=asynchronous)
-            else:
-                self.consumer.commit(asynchronous=asynchronous)
-                
-        except KafkaException as e:
-            logger.error(f"Error committing offsets: {str(e)}")
-            
-    def close(self):
-        """
-        Close the consumer and commit final offsets
-        """
-        if self.consumer:
-            try:
-                self.consumer.close()
-                logger.info("Kafka consumer closed")
+                self._producer = KafkaProducer(
+                    bootstrap_servers=self.bootstrap_servers,
+                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                    key_serializer=lambda k: str(k).encode('utf-8') if k else None,
+                    acks='all',  # Wait for all replicas to acknowledge
+                    retries=3,   # Retry sending messages up to 3 times
+                    retry_backoff_ms=500  # Wait 500ms between retries
+                )
+                logger.info(f"Kafka producer initialized with servers: {self.bootstrap_servers}")
             except Exception as e:
-                logger.error(f"Error closing Kafka consumer: {str(e)}")
+                logger.error(f"Failed to create Kafka producer: {str(e)}")
+                self._producer = None
+        return self._producer
 
-
-class KafkaAdminUtils:
-    """
-    Utility class for Kafka administration tasks
-    """
-    
-    @staticmethod
-    def check_connection(bootstrap_servers: Optional[str] = None) -> bool:
+    def get_consumer(self, topic: str, group_id: str) -> Optional[KafkaConsumer]:
         """
-        Check if Kafka connection is working
+        Get or create a consumer for a specific topic and group.
         
         Args:
-            bootstrap_servers: Kafka bootstrap servers, defaults to settings
+            topic: The Kafka topic to consume from
+            group_id: The consumer group ID
             
         Returns:
-            bool: True if connection is working, False otherwise
+            KafkaConsumer: Configured Kafka consumer instance or None if initialization fails
         """
-        if not bootstrap_servers:
-            bootstrap_servers = getattr(settings, 'KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
-            
-        config = {
-            'bootstrap.servers': bootstrap_servers,
-            'client.id': 'supplier-ranking-connection-test'
-        }
+        consumer_key = f"{topic}_{group_id}"
+        if consumer_key not in self._consumers:
+            try:
+                consumer = KafkaConsumer(
+                    topic,
+                    bootstrap_servers=self.bootstrap_servers,
+                    group_id=group_id,
+                    auto_offset_reset='earliest',
+                    value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+                    key_deserializer=lambda x: x.decode('utf-8') if x else None,
+                    enable_auto_commit=True,
+                    auto_commit_interval_ms=5000,  # Commit offsets every 5 seconds
+                    session_timeout_ms=30000,  # Timeout if no heartbeat in 30 seconds
+                    heartbeat_interval_ms=10000  # Heartbeat every 10 seconds
+                )
+                self._consumers[consumer_key] = consumer
+                logger.info(f"Kafka consumer created for topic {topic}, group {group_id}")
+            except Exception as e:
+                logger.error(f"Failed to create Kafka consumer for topic {topic}: {str(e)}")
+                return None
+        return self._consumers[consumer_key]
+
+    def publish_event(self, topic: str, event_type: str, payload: Dict[str, Any], key: str = None) -> bool:
+        """
+        Publish an event to a Kafka topic.
         
-        try:
-            # Create a producer to test connection
-            producer = ConfluentProducer(config)
-            producer.list_topics(timeout=5.0)
-            logger.info("Kafka connection test successful")
-            return True
-        except KafkaException as e:
-            logger.error(f"Kafka connection test failed: {str(e)}")
+        Args:
+            topic: Kafka topic to publish to
+            event_type: Type of event being published
+            payload: Event data to publish
+            key: Optional message key for partitioning
+            
+        Returns:
+            bool: True if publishing was successful, False otherwise
+        """
+        if self.producer is None:
+            logger.error("Kafka producer not initialized - cannot publish event")
             return False
 
+        message = {
+            'event_type': event_type,
+            'timestamp': int(time.time() * 1000),
+            'payload': payload,
+            'source': 'supplier_ranking_service'
+        }
 
-def setup_kafka_logging():
+        try:
+            future = self.producer.send(topic, key=key, value=message)
+            future.get(timeout=10)  # Wait for the send to complete
+            logger.info(f"Published event {event_type} to topic {topic}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to publish event to Kafka topic {topic}: {str(e)}")
+            return False
+
+    def subscribe(self, topic: str, group_id: str, callback: Callable[[Dict[str, Any], Optional[str]], None]) -> bool:
+        """
+        Subscribe to a topic and process messages with a callback.
+        
+        Args:
+            topic: Kafka topic to subscribe to
+            group_id: Consumer group ID
+            callback: Function to call with each message (takes message value and key as parameters)
+            
+        Returns:
+            bool: True if subscription was successful, False otherwise
+        """
+        consumer = self.get_consumer(topic, group_id)
+        if not consumer:
+            logger.error(f"Failed to subscribe to topic {topic}: consumer could not be created")
+            return False
+
+        def consumer_thread():
+            logger.info(f"Starting consumer for topic {topic}, group {group_id}")
+            try:
+                for message in consumer:
+                    if not self._running:
+                        break
+                    try:
+                        logger.debug(f"Received message from {topic}: {message.value}")
+                        callback(message.value, message.key)
+                    except Exception as e:
+                        logger.error(f"Error processing Kafka message: {str(e)}")
+            except Exception as e:
+                logger.error(f"Consumer error for topic {topic}: {str(e)}")
+            finally:
+                try:
+                    consumer.close()
+                    logger.info(f"Consumer for topic {topic}, group {group_id} stopped")
+                except Exception as e:
+                    logger.error(f"Error closing consumer: {str(e)}")
+
+        thread_key = f"{topic}_{group_id}"
+        self._consumer_threads[thread_key] = threading.Thread(
+            target=consumer_thread,
+            name=f"kafka-consumer-{topic}-{group_id}"
+        )
+        self._consumer_threads[thread_key].daemon = True
+        logger.info(f"Created consumer thread for topic {topic}, group {group_id}")
+        return True
+
+    def start(self) -> None:
+        """Start all consumers"""
+        self._running = True
+        for thread_key, thread in self._consumer_threads.items():
+            if not thread.is_alive():
+                thread.start()
+                logger.info(f"Started consumer thread: {thread_key}")
+        logger.info("Kafka client started")
+
+    def stop(self) -> None:
+        """Stop all consumers and producer"""
+        logger.info("Stopping Kafka client...")
+        self._running = False
+        
+        # Stop consumer threads
+        for thread_key, thread in self._consumer_threads.items():
+            if thread.is_alive():
+                logger.info(f"Joining thread {thread_key}")
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    logger.warning(f"Thread {thread_key} did not terminate gracefully")
+        
+        # Close consumers
+        for consumer_key, consumer in self._consumers.items():
+            try:
+                logger.info(f"Closing consumer {consumer_key}")
+                consumer.close()
+            except Exception as e:
+                logger.error(f"Error closing consumer {consumer_key}: {str(e)}")
+        
+        # Clear collections
+        self._consumers = {}
+        self._consumer_threads = {}
+        
+        # Close producer
+        if self._producer:
+            try:
+                logger.info("Closing Kafka producer")
+                self._producer.close()
+                self._producer = None
+            except Exception as e:
+                logger.error(f"Error closing producer: {str(e)}")
+        
+        logger.info("Kafka client stopped")
+
+
+# Singleton instance
+kafka_client = KafkaClient()
+
+
+class SupplierEventConsumer:
     """
-    Configure logging for Kafka operations
+    Consumer for supplier events from the Auth Service.
+    Handles events related to supplier creation, updates, and deletion.
     """
-    kafka_logger = logging.getLogger('kafka')
-    kafka_logger.setLevel(logging.WARNING)
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    kafka_logger.addHandler(handler)
+
+    def __init__(self):
+        """Initialize consumer with topic and group ID from settings"""
+        self.topic = settings.KAFKA_SUPPLIER_EVENTS_TOPIC
+        self.group_id = settings.KAFKA_CONSUMER_GROUP_ID
+        
+    def start(self) -> bool:
+        """
+        Start consuming supplier events from Kafka.
+        
+        Returns:
+            bool: True if consumer started successfully, False otherwise
+        """
+        success = kafka_client.subscribe(
+            self.topic,
+            self.group_id,
+            self._process_supplier_event
+        )
+        if success:
+            kafka_client.start()
+            logger.info(f"Started supplier event consumer on topic {self.topic}")
+            return True
+        logger.error(f"Failed to start supplier event consumer on topic {self.topic}")
+        return False
+
+    def _process_supplier_event(self, event: Dict[str, Any], key: Optional[str]) -> None:
+        """
+        Process a supplier event from Kafka.
+        
+        Args:
+            event: The event data including type and payload
+            key: Optional message key
+        """
+        event_type = event.get('event_type')
+        payload = event.get('payload', {})
+        
+        if not event_type or not payload:
+            logger.warning(f"Received invalid supplier event: {event}")
+            return
+        
+        logger.info(f"Processing supplier event: {event_type}")
+        
+        # Import here to avoid circular imports
+        from ranking_engine.services.supplier_service import update_supplier_cache
+        
+        try:
+            if event_type == 'supplier_created':
+                supplier_id = payload.get('id')
+                if supplier_id:
+                    logger.info(f"Processing supplier created event for supplier {supplier_id}")
+                    update_supplier_cache(supplier_id)
+            elif event_type == 'supplier_updated':
+                supplier_id = payload.get('id')
+                if supplier_id:
+                    logger.info(f"Processing supplier updated event for supplier {supplier_id}")
+                    update_supplier_cache(supplier_id)
+            elif event_type == 'supplier_deleted':
+                supplier_id = payload.get('id')
+                if supplier_id:
+                    logger.info(f"Processing supplier deleted event for supplier {supplier_id}")
+                    # Implement deletion logic if needed
+                    pass
+            else:
+                logger.warning(f"Unknown event type: {event_type}")
+        except Exception as e:
+            logger.error(f"Error handling supplier event: {str(e)}")
+
+
+class RankingEventProducer:
+    """
+    Producer for ranking events.
+    Publishes events related to supplier ranking updates and batch completions.
+    """
+
+    def __init__(self):
+        """Initialize producer with topic from settings"""
+        self.topic = settings.KAFKA_RANKING_EVENTS_TOPIC
+        
+    def publish_ranking_update(self, supplier_id: int, ranking_data: Dict[str, Any]) -> bool:
+        """
+        Publish a ranking update event.
+        
+        Args:
+            supplier_id: ID of the supplier whose ranking was updated
+            ranking_data: The updated ranking data
+            
+        Returns:
+            bool: True if publishing was successful, False otherwise
+        """
+        logger.info(f"Publishing ranking update for supplier {supplier_id}")
+        return kafka_client.publish_event(
+            self.topic,
+            'ranking_updated',
+            {
+                'supplier_id': supplier_id,
+                'ranking': ranking_data,
+                'timestamp': int(time.time() * 1000)
+            },
+            key=str(supplier_id)
+        )
+        
+    def publish_ranking_batch_complete(self, date: str, count: int, summary: Dict[str, Any] = None) -> bool:
+        """
+        Publish event when a batch ranking is complete.
+        
+        Args:
+            date: The date the batch ranking was completed for
+            count: Number of suppliers ranked in the batch
+            summary: Optional summary data about the batch
+            
+        Returns:
+            bool: True if publishing was successful, False otherwise
+        """
+        logger.info(f"Publishing ranking batch completion for date {date}, {count} suppliers ranked")
+        payload = {
+            'date': str(date),
+            'supplier_count': count
+        }
+        
+        if summary:
+            payload['summary'] = summary
+            
+        return kafka_client.publish_event(
+            self.topic,
+            'ranking_batch_complete',
+            payload
+        )
+
+
+class IntegrationEventProducer:
+    """
+    Producer for integration events with other microservices.
+    Publishes events that other services might be interested in.
+    """
+    
+    def __init__(self):
+        """Initialize producer with topic from settings"""
+        self.topic = settings.KAFKA_INTEGRATION_EVENTS_TOPIC
+        
+    def publish_quality_issue_detected(self, supplier_id: int, quality_data: Dict[str, Any]) -> bool:
+        """
+        Publish an event when a quality issue is detected.
+        
+        Args:
+            supplier_id: ID of the supplier with quality issues
+            quality_data: Data about the quality issue
+            
+        Returns:
+            bool: True if publishing was successful, False otherwise
+        """
+        return kafka_client.publish_event(
+            self.topic,
+            'quality_issue_detected',
+            {
+                'supplier_id': supplier_id,
+                'quality_data': quality_data
+            },
+            key=str(supplier_id)
+        )
+        
+    def publish_significant_rank_change(self, supplier_id: int, old_rank: int, new_rank: int, reason: str) -> bool:
+        """
+        Publish an event when a supplier's rank changes significantly.
+        
+        Args:
+            supplier_id: ID of the supplier
+            old_rank: Previous rank
+            new_rank: New rank
+            reason: Reason for the rank change
+            
+        Returns:
+            bool: True if publishing was successful, False otherwise
+        """
+        return kafka_client.publish_event(
+            self.topic,
+            'significant_rank_change',
+            {
+                'supplier_id': supplier_id,
+                'old_rank': old_rank,
+                'new_rank': new_rank,
+                'reason': reason
+            },
+            key=str(supplier_id)
+        )
+
+
+# Initialize singleton instances
+supplier_consumer = SupplierEventConsumer()
+ranking_producer = RankingEventProducer()
+integration_producer = IntegrationEventProducer()

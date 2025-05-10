@@ -50,6 +50,7 @@ class SupplierRanking(models.Model):
     price_score = models.FloatField(validators=[MinValueValidator(0), MaxValueValidator(10)])
     service_score = models.FloatField(validators=[MinValueValidator(0), MaxValueValidator(10)])
     rank = models.IntegerField(help_text="Rank position among all suppliers")
+    tier = models.IntegerField(default=3, help_text="Supplier tier level (1-3, with 1 being highest)")
     state = models.ForeignKey(QLearningState, on_delete=models.SET_NULL, null=True, related_name='supplier_rankings')
     notes = models.TextField(blank=True, null=True)
     

@@ -1,5 +1,5 @@
 from django.shortcuts import get_object_or_404
-from django.db.models import Avg, Count, Q, F, Sum
+from django.db.models import Avg, Count, Q, F, Sum, Max
 from django.http import HttpResponse
 from rest_framework import viewsets, status, filters
 from rest_framework.views import APIView
@@ -365,161 +365,176 @@ class SupplierRankingHistoryView(APIView):
 
 class PerformanceDashboardView(APIView):
     """
-    API endpoint to provide data for a performance dashboard.
+    API endpoint to get aggregate supplier performance metrics
+    for creating dashboards and reports.
     """
     def get(self, request):
         # Get data for the last 90 days by default
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=90)
+        days = int(request.query_params.get('days', 90))
         
-        # Override with query params if provided
-        if request.query_params.get('start_date'):
-            start_date = datetime.strptime(request.query_params.get('start_date'), '%Y-%m-%d').date()
-        if request.query_params.get('end_date'):
-            end_date = datetime.strptime(request.query_params.get('end_date'), '%Y-%m-%d').date()
+        # Get all supplier rankings
+        latest_date = SupplierRanking.objects.aggregate(Max('date'))['date__max']
         
-        # Get all active suppliers from user service
-        try:
-            active_suppliers = get_service_data('user_service', 'suppliers', {'is_active': True})
-        except Exception as e:
-            return Response({"error": f"Failed to fetch active suppliers: {str(e)}"}, 
-                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        if not active_suppliers:
-            return Response({"error": "No active suppliers found"}, status=status.HTTP_404_NOT_FOUND)
-        
-        # Prepare supplier ID list
-        supplier_ids = [supplier['id'] for supplier in active_suppliers]
-        
-        # Get latest rankings
-        latest_rankings = {}
-        for supplier_id in supplier_ids:
-            ranking = SupplierRanking.objects.filter(
-                supplier_id=supplier_id,
-                date__gte=start_date,
-                date__lte=end_date
-            ).order_by('-date').first()
+        if not latest_date:
+            return Response({"error": "No ranking data available"}, status=status.HTTP_404_NOT_FOUND)
             
-            if ranking:
-                latest_rankings[supplier_id] = {
-                    "rank": ranking.rank,
-                    "overall_score": ranking.overall_score
-                }
+        latest_rankings = SupplierRanking.objects.filter(date=latest_date).order_by('rank')
         
-        # Get average performance metrics for the period
-        period_performances = SupplierPerformanceCache.objects.filter(
-            supplier_id__in=supplier_ids,
-            date__gte=start_date,
-            date__lte=end_date
-        )
+        # Aggregate performance metrics
+        avg_quality = latest_rankings.aggregate(Avg('quality_score'))['quality_score__avg'] or 0
+        avg_delivery = latest_rankings.aggregate(Avg('delivery_score'))['delivery_score__avg'] or 0
+        avg_price = latest_rankings.aggregate(Avg('price_score'))['price_score__avg'] or 0
+        avg_service = latest_rankings.aggregate(Avg('service_score'))['service_score__avg'] or 0
+        avg_overall = latest_rankings.aggregate(Avg('overall_score'))['overall_score__avg'] or 0
         
-        avg_metrics = period_performances.values('supplier_id').annotate(
-            avg_quality_score=Avg('quality_score'),
-            avg_defect_rate=Avg('defect_rate'),
-            avg_on_time_delivery=Avg('on_time_delivery_rate'),
-            avg_price=Avg('price_competitiveness')
-        )
-        
-        # Convert to dictionary keyed by supplier_id
-        supplier_metrics = {}
-        for metric in avg_metrics:
-            supplier_metrics[metric['supplier_id']] = {
-                "avg_quality_score": metric['avg_quality_score'],
-                "avg_defect_rate": metric['avg_defect_rate'],
-                "avg_on_time_delivery": metric['avg_on_time_delivery'],
-                "avg_price": metric['avg_price']
+        # Get performance metrics from cache
+        latest_cache_date = SupplierPerformanceCache.objects.aggregate(Max('date'))['date__max']
+        if latest_cache_date:
+            latest_cache = SupplierPerformanceCache.objects.filter(date=latest_cache_date)
+            avg_defect_rate = latest_cache.aggregate(Avg('defect_rate'))['defect_rate__avg'] or 0
+            avg_return_rate = latest_cache.aggregate(Avg('return_rate'))['return_rate__avg'] or 0
+            avg_on_time_rate = latest_cache.aggregate(Avg('on_time_delivery_rate'))['on_time_delivery_rate__avg'] or 0
+            avg_compliance = latest_cache.aggregate(Avg('compliance_score'))['compliance_score__avg'] or 0
+        else:
+            avg_defect_rate = 0
+            avg_return_rate = 0
+            avg_on_time_rate = 0
+            avg_compliance = 0
+            
+        # Get top and bottom 5 suppliers
+        top_suppliers = [
+            {
+                "supplier_id": r.supplier_id,
+                "supplier_name": r.supplier_name,
+                "rank": r.rank,
+                "overall_score": r.overall_score,
+                "quality_score": r.quality_score,
+                "delivery_score": r.delivery_score,
+                "price_score": r.price_score,
+                "service_score": r.service_score,
+                "compliance_score": SupplierPerformanceCache.objects.filter(
+                    supplier_id=r.supplier_id, date=latest_cache_date
+                ).first().compliance_score if latest_cache_date else None
             }
+            for r in latest_rankings[:5]
+        ]
         
-        # Combine all data
-        dashboard_data = []
-        for supplier in active_suppliers:
-            supplier_id = supplier['id']
-            metrics = supplier_metrics.get(supplier_id, {})
-            ranking = latest_rankings.get(supplier_id, {})
-            
-            dashboard_data.append({
-                "supplier_id": supplier_id,
-                "supplier_name": supplier['name'],
-                "supplier_code": supplier.get('code', ''),
-                "metrics": metrics,
-                "ranking": ranking
-            })
+        bottom_suppliers = [
+            {
+                "supplier_id": r.supplier_id,
+                "supplier_name": r.supplier_name,
+                "rank": r.rank,
+                "overall_score": r.overall_score,
+                "quality_score": r.quality_score,
+                "delivery_score": r.delivery_score,
+                "price_score": r.price_score,
+                "service_score": r.service_score,
+                "compliance_score": SupplierPerformanceCache.objects.filter(
+                    supplier_id=r.supplier_id, date=latest_cache_date
+                ).first().compliance_score if latest_cache_date else None
+            }
+            for r in latest_rankings.reverse()[:5]
+        ]
         
-        # Sort by rank (if available)
-        sorted_data = sorted(
-            dashboard_data, 
-            key=lambda x: x['ranking'].get('rank', float('inf')) if x.get('ranking') else float('inf')
-        )
+        # Get metrics over time (for charts)
+        # Group by date and calculate average scores
+        time_series_data = SupplierRanking.objects.values('date').annotate(
+            avg_overall=Avg('overall_score'),
+            avg_quality=Avg('quality_score'),
+            avg_delivery=Avg('delivery_score'),
+            avg_price=Avg('price_score'),
+            avg_service=Avg('service_score')
+        ).order_by('date')
         
-        return Response({
-            "period": {
-                "start_date": start_date,
-                "end_date": end_date
+        time_series = [
+            {
+                "date": entry['date'],
+                "avg_overall": entry['avg_overall'],
+                "avg_quality": entry['avg_quality'],
+                "avg_delivery": entry['avg_delivery'],
+                "avg_price": entry['avg_price'],
+                "avg_service": entry['avg_service']
+            }
+            for entry in time_series_data
+        ]
+        
+        # Build response
+        response_data = {
+            "average_scores": {
+                "overall": round(avg_overall, 2),
+                "quality": round(avg_quality, 2),
+                "delivery": round(avg_delivery, 2),
+                "price": round(avg_price, 2),
+                "service": round(avg_service, 2),
+                "compliance": round(avg_compliance, 2)
             },
-            "total_suppliers": len(active_suppliers),
-            "dashboard_data": sorted_data
-        })
+            "key_metrics": {
+                "defect_rate": round(avg_defect_rate, 2),
+                "return_rate": round(avg_return_rate, 2),
+                "on_time_delivery_rate": round(avg_on_time_rate, 2)
+            },
+            "top_suppliers": top_suppliers,
+            "bottom_suppliers": bottom_suppliers,
+            "time_series": time_series,
+            "supplier_count": latest_rankings.count(),
+            "data_as_of": latest_date
+        }
+        
+        return Response(response_data)
 
 
 # Recommendation Views
 class SupplierRecommendationView(APIView):
     """
-    API endpoint to recommend suppliers for a specific product based on requirements.
+    API endpoint to get supplier recommendations based on product requirements.
     """
     def post(self, request):
         serializer = SupplierRecommendationSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
-        product_id = serializer.validated_data['product_id']
-        quantity = serializer.validated_data['quantity']
-        delivery_date = serializer.validated_data['delivery_date']
+        # Extract requirements
+        product_id = serializer.validated_data.get('product_id')
+        quantity = serializer.validated_data.get('quantity', 1)
+        delivery_date = serializer.validated_data.get('delivery_date')
         prioritize_quality = serializer.validated_data.get('prioritize_quality', False)
         prioritize_delivery = serializer.validated_data.get('prioritize_delivery', False)
         
-        # Get product data from warehouse service
+        # Get suppliers that can provide this product
         try:
-            product_data = get_service_data('warehouse_service', f'products/{product_id}')
+            suppliers_providing_product = get_service_data(
+                'warehouse_service', 
+                f'products/{product_id}/suppliers'
+            )
         except Exception as e:
-            return Response({"error": f"Failed to fetch product data: {str(e)}"}, 
+            return Response({"error": f"Error fetching suppliers: {str(e)}"}, 
                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-        if not product_data:
-            return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
+        if not suppliers_providing_product:
+            return Response({"message": "No suppliers found for this product"}, 
+                           status=status.HTTP_404_NOT_FOUND)
         
-        # Get suppliers for this product from warehouse service
-        try:
-            supplier_products = get_service_data('warehouse_service', 'supplier-products', 
-                                              {'product_id': product_id, 'min_quantity': quantity})
-        except Exception as e:
-            return Response({"error": f"Failed to fetch supplier-product data: {str(e)}"}, 
-                           status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        if not supplier_products:
-            return Response({
-                "message": "No suppliers found for the specified product and quantity"
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        # Calculate days until delivery
-        today = datetime.now().date()
-        delivery_date_obj = datetime.strptime(delivery_date, '%Y-%m-%d').date() if isinstance(delivery_date, str) else delivery_date
-        days_until_delivery = (delivery_date_obj - today).days
-        
-        # List to store supplier recommendations
+        # For each supplier, get their performance data
         recommendations = []
-        
-        for sp in supplier_products:
-            supplier_id = sp['supplier_id']
+        for sp in suppliers_providing_product:
+            supplier_id = sp.get('supplier_id')
             
-            # Check if supplier can deliver on time
-            can_deliver_on_time = sp.get('lead_time_days', float('inf')) <= days_until_delivery
-            
-            # Get latest performance data from cache
-            latest_performance = SupplierPerformanceCache.objects.filter(supplier_id=supplier_id).order_by('-date').first()
+            # Get latest performance cache
+            latest_performance = SupplierPerformanceCache.objects.filter(
+                supplier_id=supplier_id
+            ).order_by('-date').first()
             
             if latest_performance:
                 # Get latest ranking
                 latest_ranking = SupplierRanking.objects.filter(supplier_id=supplier_id).order_by('-date').first()
+                
+                # Get supplier data to access compliance score
+                try:
+                    connector = UserServiceConnector()
+                    supplier_data = connector.get_supplier_by_id(supplier_id)
+                    compliance_score = supplier_data.get('compliance_score', 5.0) if supplier_data else 5.0
+                except Exception:
+                    compliance_score = 5.0
                 
                 # Calculate a recommendation score based on the requirements
                 recommendation_score = 0
@@ -527,6 +542,26 @@ class SupplierRecommendationView(APIView):
                 # Base score is the overall supplier ranking score
                 if latest_ranking:
                     recommendation_score = latest_ranking.overall_score
+                else:
+                    # If no ranking exists, use a weighted combination of performance metrics and compliance score
+                    recommendation_score = (
+                        latest_performance.quality_score * 0.25 +
+                        latest_performance.on_time_delivery_rate / 10 * 0.25 +  # Convert to 0-10 scale
+                        latest_performance.price_competitiveness * 0.25 +
+                        latest_performance.responsiveness * 0.05 +
+                        compliance_score * 0.2
+                    )
+                
+                # Check if supplier can deliver by the requested date
+                lead_time_days = sp.get('lead_time_days', 0)
+                if delivery_date:
+                    from datetime import datetime, timedelta
+                    today = datetime.now().date()
+                    delivery_date_obj = datetime.strptime(delivery_date, '%Y-%m-%d').date() if isinstance(delivery_date, str) else delivery_date
+                    days_until_delivery = (delivery_date_obj - today).days
+                    can_deliver_on_time = days_until_delivery >= lead_time_days
+                else:
+                    can_deliver_on_time = True
                 
                 # Adjust score based on priorities
                 if prioritize_quality:
@@ -544,6 +579,9 @@ class SupplierRecommendationView(APIView):
                 unit_price = sp.get('unit_price', 0)
                 recommendation_score -= (unit_price / 100)  # Adjust weight as needed
                 
+                # Include compliance score in recommendation
+                recommendation_score += compliance_score * 0.3
+                
                 # Store recommendation
                 recommendations.append({
                     "supplier_id": supplier_id,
@@ -553,45 +591,19 @@ class SupplierRecommendationView(APIView):
                     "can_deliver_on_time": can_deliver_on_time,
                     "quality_score": latest_performance.quality_score,
                     "on_time_delivery_rate": latest_performance.on_time_delivery_rate,
+                    "compliance_score": compliance_score,
                     "recommendation_score": round(recommendation_score, 2),
                     "is_preferred": sp.get('is_preferred', False)
                 })
         
-        # Sort recommendations by score (highest first)
-        sorted_recommendations = sorted(recommendations, key=lambda x: x['recommendation_score'], reverse=True)
-        
-        # Generate explanation text
-        if prioritize_quality and prioritize_delivery:
-            explanation = "Recommendations prioritize suppliers with high quality scores and reliable delivery times."
-        elif prioritize_quality:
-            explanation = "Recommendations prioritize suppliers with high quality scores."
-        elif prioritize_delivery:
-            explanation = "Recommendations prioritize suppliers that can deliver on time."
-        else:
-            explanation = "Recommendations are based on overall supplier performance and pricing."
-        
-        # Log the recommendation event
-        RankingEvent.objects.create(
-            event_type='RECOMMENDATION_MADE',
-            description=f"Product recommendation for product ID: {product_id}",
-            metadata={
-                'product_id': product_id,
-                'quantity': quantity,
-                'delivery_date': str(delivery_date),
-                'prioritize_quality': prioritize_quality,
-                'prioritize_delivery': prioritize_delivery,
-                'top_recommendation': sorted_recommendations[0] if sorted_recommendations else None
-            }
-        )
+        # Sort by recommendation score (higher is better)
+        recommendations.sort(key=lambda x: x['recommendation_score'], reverse=True)
         
         return Response({
             "product_id": product_id,
-            "product_name": product_data.get('name', f"Product {product_id}"),
             "quantity": quantity,
             "delivery_date": delivery_date,
-            "days_until_delivery": days_until_delivery,
-            "recommendations": sorted_recommendations,
-            "explanation": explanation
+            "recommendations": recommendations
         })
 
 

@@ -40,7 +40,7 @@ class SupplierService:
         """
         try:
             suppliers = self.user_service.get_active_suppliers()
-            return [supplier.get('id') for supplier in suppliers]
+            return [supplier['user']['id'] for supplier in suppliers]
         except Exception as e:
             logger.error(f"Error retrieving active supplier IDs: {str(e)}")
             return []
@@ -166,13 +166,26 @@ class SupplierService:
             logger.error(f"Error retrieving category performance for supplier {supplier_id}: {str(e)}")
             return {}
     
-    def update_supplier_preferences(self, supplier_id, preferences_data):
+    def get_all_suppliers(self):
         """
-        Updates preference flags for a supplier's products through Warehouse Service
+        Returns all suppliers from User Service
+        
+        Returns:
+            list: List of supplier dictionaries
         """
         try:
-            success = self.warehouse_service.update_supplier_preferences(supplier_id, preferences_data)
-            return success
+            return self.user_service.get_all_suppliers()
         except Exception as e:
-            logger.error(f"Error updating preferences for supplier {supplier_id}: {str(e)}")
-            return False
+            logger.error(f"Error retrieving all suppliers: {str(e)}")
+            return []
+    
+    # def update_supplier_preferences(self, supplier_id, preferences_data):
+    #     """
+    #     Updates preference flags for a supplier's products through Warehouse Service
+    #     """
+    #     try:
+    #         success = self.warehouse_service.update_supplier_preferences(supplier_id, preferences_data)
+    #         return success
+    #     except Exception as e:
+    #         logger.error(f"Error updating preferences for supplier {supplier_id}: {str(e)}")
+    #         return False

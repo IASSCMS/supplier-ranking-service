@@ -276,7 +276,7 @@ def calculate_supplier_metrics(supplier_id, start_date=None, end_date=None):
     # Combine all metrics
     result = {
         'supplier_id': supplier_id,
-        'supplier_name': supplier.get('name', f'Supplier {supplier_id}'),
+        'supplier_name': supplier.get('company_name', f'Supplier {supplier_id}'),
         'data_available': True,
         'metrics_period': {
             'start_date': start_date,
@@ -321,7 +321,7 @@ def extract_features_for_q_learning(supplier_id, metrics=None):
     
     # Get all active suppliers for normalization context
     all_suppliers = get_all_active_suppliers()
-    supplier_ids = [s.get('id') for s in all_suppliers]
+    supplier_ids = [s['user'].get('id') for s in all_suppliers]
     
     # If there's only one supplier, we can't normalize properly
     if len(supplier_ids) <= 1:
@@ -507,7 +507,7 @@ def prepare_supplier_data_for_ranking(supplier_ids=None, days=90):
     if not supplier_ids:
         # Get active suppliers
         suppliers = get_all_active_suppliers()
-        supplier_ids = [s.get('id') for s in suppliers]
+        supplier_ids = [s['user'].get('id') for s in suppliers]
     
     start_date = timezone.now().date() - timedelta(days=days)
     end_date = timezone.now().date()

@@ -18,6 +18,8 @@ from connectors.group32_connector import Group32Connector
 
 # Import service clients
 from ranking_engine.services.integration_service import IntegrationService
+from ranking_engine.services.metrics_service import MetricsService
+from ranking_engine.services.supplier_service import SupplierService
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +38,17 @@ class StateMapper:
     PRICE_THRESHOLDS = [3.0, 5.0, 7.0, 9.0]    # Price competitiveness score
     SERVICE_THRESHOLDS = [3.0, 5.0, 7.0, 9.0]  # Service quality score
     
-    def __init__(self, time_window=90):
+    def __init__(self, time_window=30):
         """
         Initialize the StateMapper.
         
         Args:
-            time_window (int): Number of days to look back for metrics calculation
+            time_window (int): Time window in days for metrics calculation
         """
         self.time_window = time_window
         self.integration_service = IntegrationService()
+        self.metrics_service = MetricsService()
+        self.supplier_service = SupplierService()
         
         # Initialize connectors
         self.forecasting_connector = Group29Connector()
@@ -59,35 +63,100 @@ class StateMapper:
             supplier_id (int): ID of the supplier
             
         Returns:
-            QLearningState: The state object representing the supplier's current state
+            QLearningState: State object
         """
-        # First check if we have cached performance data
-        metrics = self._get_cached_metrics(supplier_id)
-        
-        # If no cache or incomplete data, calculate metrics from external services
-        if not metrics:
-            metrics = self._calculate_supplier_metrics(supplier_id)
+        try:
+            # Get supplier metrics
+            metrics = self.metrics_service.get_supplier_metrics(supplier_id)
             
-            # Log event for data fetching
-            self._log_data_fetch_event(supplier_id, metrics)
+            # Map metrics to state
+            return self.get_state_from_metrics(metrics)
+            
+        except Exception as e:
+            logger.error(f"Error getting state for supplier {supplier_id}: {str(e)}")
+            # Return a default "unknown" state
+            unknown_state, _ = QLearningState.objects.get_or_create(
+                name="unknown",
+                defaults={'description': 'Unknown or error state'}
+            )
+            return unknown_state
+    
+    def get_default_state(self):
+        """
+        Get a default state when supplier data cannot be retrieved.
         
-        # Map metrics to state category
-        quality_category = self._categorize_metric(metrics['quality_score'], self.QUALITY_THRESHOLDS)
-        delivery_category = self._categorize_metric(metrics['on_time_delivery_rate'], self.DELIVERY_THRESHOLDS)
-        price_category = self._categorize_metric(metrics['price_competitiveness'], self.PRICE_THRESHOLDS)
-        service_category = self._categorize_metric(metrics['service_score'], self.SERVICE_THRESHOLDS)
-        
-        # Create a state name based on the categories
-        state_name = f"Q{quality_category}_D{delivery_category}_P{price_category}_S{service_category}"
-        
-        # Get or create the state in the database
-        state, created = QLearningState.objects.get_or_create(
-            name=state_name,
-            defaults={'description': f"Quality: {quality_category}/5, Delivery: {delivery_category}/5, "
-                                    f"Price: {price_category}/5, Service: {service_category}/5"}
+        Returns:
+            QLearningState: Default state object
+        """
+        unknown_state, _ = QLearningState.objects.get_or_create(
+            name="unknown",
+            defaults={'description': 'Unknown or error state'}
         )
+        return unknown_state
+    
+    def get_state_from_metrics(self, metrics):
+        """
+        Map supplier metrics to a state.
         
-        return state
+        Args:
+            metrics (dict): Supplier performance metrics
+            
+        Returns:
+            QLearningState: State object
+        """
+        try:
+            # Extract metrics
+            quality_score = metrics.get('quality_score', 0.0)
+            delivery_score = metrics.get('delivery_score', 0.0)
+            price_score = metrics.get('price_score', 0.0)
+            service_score = metrics.get('service_score', 0.0)
+            
+            # Map scores to discrete levels (1-5)
+            quality_level = self._map_score_to_level(quality_score)
+            delivery_level = self._map_score_to_level(delivery_score)
+            price_level = self._map_score_to_level(price_score)
+            service_level = self._map_score_to_level(service_score)
+            
+            # Create state name
+            state_name = f"Q{quality_level}_D{delivery_level}_P{price_level}_S{service_level}"
+            
+            # Get or create state
+            state, created = QLearningState.objects.get_or_create(
+                name=state_name,
+                defaults={'description': f'State with quality={quality_level}, delivery={delivery_level}, price={price_level}, service={service_level}'}
+            )
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Error mapping metrics to state: {str(e)}")
+            # Return a default "unknown" state
+            unknown_state, _ = QLearningState.objects.get_or_create(
+                name="unknown",
+                defaults={'description': 'Unknown or error state'}
+            )
+            return unknown_state
+    
+    def _map_score_to_level(self, score):
+        """
+        Map a continuous score to a discrete level (1-5).
+        
+        Args:
+            score (float): Continuous score (0-10)
+            
+        Returns:
+            int: Discrete level (1-5)
+        """
+        if score >= 8.0:
+            return 5
+        elif score >= 6.0:
+            return 4
+        elif score >= 4.0:
+            return 3
+        elif score >= 2.0:
+            return 2
+        else:
+            return 1
     
     def _get_cached_metrics(self, supplier_id):
         """
@@ -97,7 +166,7 @@ class StateMapper:
             supplier_id (int): ID of the supplier
             
         Returns:
-            dict or None: Dictionary of metrics if cache exists, None otherwise
+            dict: Cached metrics
         """
         today = datetime.now().date()
         cutoff_date = today - timedelta(days=self.time_window)
@@ -131,7 +200,7 @@ class StateMapper:
             supplier_id (int): ID of the supplier
             
         Returns:
-            dict: Dictionary containing performance metrics
+            dict: Calculated metrics
         """
         metrics = {}
         today = datetime.now().date()
@@ -319,37 +388,3 @@ class StateMapper:
                         states.append(state)
         
         return states
-    
-    def get_state_from_metrics(self, metrics):
-        """
-        Map metrics dictionary directly to a state.
-        
-        Args:
-            metrics (dict): Dictionary containing performance metrics
-                
-        Returns:
-            QLearningState: The state object representing the supplier's state
-        """
-        # Get metrics with default values if keys are missing
-        quality_score = metrics.get('quality_score', 5.0)
-        on_time_delivery_rate = metrics.get('on_time_delivery_rate', 80.0)
-        price_competitiveness = metrics.get('price_competitiveness', 5.0)
-        service_score = metrics.get('service_score', 5.0)
-        
-        # Map metrics to state category
-        quality_category = self._categorize_metric(quality_score, self.QUALITY_THRESHOLDS)
-        delivery_category = self._categorize_metric(on_time_delivery_rate, self.DELIVERY_THRESHOLDS)
-        price_category = self._categorize_metric(price_competitiveness, self.PRICE_THRESHOLDS)
-        service_category = self._categorize_metric(service_score, self.SERVICE_THRESHOLDS)
-        
-        # Create a state name based on the categories
-        state_name = f"Q{quality_category}_D{delivery_category}_P{price_category}_S{service_category}"
-        
-        # Get or create the state in the database
-        state, created = QLearningState.objects.get_or_create(
-            name=state_name,
-            defaults={'description': f"Quality: {quality_category}/5, Delivery: {delivery_category}/5, "
-                                    f"Price: {price_category}/5, Service: {service_category}/5"}
-        )
-        
-        return state

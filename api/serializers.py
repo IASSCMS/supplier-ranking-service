@@ -33,10 +33,35 @@ class QTableEntrySerializer(serializers.ModelSerializer):
 
 class SupplierRankingSerializer(serializers.ModelSerializer):
     state_name = serializers.StringRelatedField(source='state')
+    compliance_score = serializers.SerializerMethodField()
     
     class Meta:
         model = SupplierRanking
         fields = '__all__'
+    
+    def get_compliance_score(self, obj):
+        """Get the compliance score from the performance cache or user service"""
+        try:
+            # First try to get from performance cache
+            cache = SupplierPerformanceCache.objects.filter(
+                supplier_id=obj.supplier_id,
+                date=obj.date
+            ).first()
+            
+            if cache and cache.compliance_score is not None:
+                return cache.compliance_score
+                
+            # If not in cache, try to get from user service
+            from connectors.user_service_connector import UserServiceConnector
+            user_service = UserServiceConnector()
+            supplier = user_service.get_supplier_by_id(obj.supplier_id)
+            
+            if supplier:
+                return supplier.get('compliance_score', 5.0)
+                
+            return 5.0  # Default value if not found
+        except Exception:
+            return 5.0  # Default value on error
 
 
 class SupplierPerformanceCacheSerializer(serializers.ModelSerializer):
